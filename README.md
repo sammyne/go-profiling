@@ -27,108 +27,124 @@ $:./main --memprofile=mem.pprof
 $:go tool pprof cpu.pprof
 ```
 
-至此就可以获得cpu.pprof和mem.pprof两个采样文件，然后利用go tool pprof工具进行分析，见下方详情图。
+至此就可以获得 cpu.pprof 和 mem.pprof 两个采样文件，然后利用 `go tool pprof` 工具进行分析如下。
 
+```bash
+➜  code git:(main) ✗ go tool pprof cpu.pprof 
+Type: cpu
+Time: Apr 7, 2021 at 2:02pm (CST)
+Duration: 201.17ms, Total samples = 130ms (64.62%)
+Entering interactive mode (type "help" for commands, "o" for options)
+(pprof) top
+Showing nodes accounting for 130ms, 100% of 130ms total
+Showing top 10 nodes out of 41
+      flat  flat%   sum%        cum   cum%
+      40ms 30.77% 30.77%       40ms 30.77%  runtime.memmove
+      20ms 15.38% 46.15%       20ms 15.38%  runtime.madvise
+      20ms 15.38% 61.54%       20ms 15.38%  runtime.pthread_kill
+      10ms  7.69% 69.23%       70ms 53.85%  main.counter (inline)
+      10ms  7.69% 76.92%       10ms  7.69%  runtime.pcdatavalue
+      10ms  7.69% 84.62%       10ms  7.69%  runtime.pthread_cond_timedwait_relative_np
+      10ms  7.69% 92.31%       10ms  7.69%  runtime.scanobject
+      10ms  7.69%   100%       10ms  7.69%  runtime.usleep
+         0     0%   100%       70ms 53.85%  main.workOnce
+         0     0%   100%       10ms  7.69%  runtime.(*gcControllerState).enlistWorker
+(pprof) 
+```
 
-如上图所示，分别有Type和Time字段就不过多解释了。下面解释一下其他字段：
+相关字段如下（`Type` 和 `Time` 字段就不过多解释了）：
 
-Duration:程序执行时间。在本例中golang自动分配任务给多个核执行程序，总计耗时301.04ms，而采样时间为690ms；也就是说假设有10核执行程序，平均每个核采样69ms的数据。
+|       字段 | 说明                                                                                                                                                    |
+| ---------: | :------------------------------------------------------------------------------------------------------------------------------------------------------ |
+|   Duration | 程序执行时间。本例中 go 自动分配任务给多个核执行程序，总计耗时 201.17ms，而采样时间为 130ms；也就是说假设有 10 核执行程序，平均每个核采样 13ms 的数据。 |
+|    (pprof) | 命令行提示。表示当前正在执行 go 的 pprof 工具命令行中，其他工具有 cgo、doc、pprof、test2json、trace 等                                                  |
+|        top | pprof 的指令之一，显示 pprof 文件的前 10 项数据，可以通过 top 20 等方式显示前 20 行数据。pprof 还有很多指令，例如 list、pdf、eog 等等                   |
+| flat/flat% | 分别表示在当前层级的 CPU 占用时间和百分比。例如 `runtime.memmove` 在当前层级占用 CPU 时间 40ms，占比本次采集时间的 30.77%                               |
+|   cum/cum% | 分别表示截止到当前层级累积的 CPU 时间和占比。例如 `main.counter` 累积占用时间 7ms，占本次采集时间的 53.85%                                              |
+|       sum% | 所有层级的 CPU 时间累积占用，从小到大一直累积到 100%，即 130ms                                                                                          |
 
-(pprof)：命令行提示。表示当前在go tool 的pprof工具命令行中，go tool还包括cgo、doc、pprof、test2json、trace等多种命令
+由上图的 `cum` 数据可以看到，`counter` 函数的 CPU 占用时间最多。接下来可利用 `list` 命令查看占用的主要因素如下
 
-top：pprof的指令之一，显示pprof文件中的前10项数据，可以通过top 20等方式显示20行数据；当然pprof下有很多指令，例如list，pdf、eog等等
+```bash
+(pprof) list main.counter
+Total: 130ms
+ROUTINE ======================== main.counter in /Users/lixiangmin01/Desktop/go-profiling/code/counter_v1.go
+      10ms       70ms (flat, cum) 53.85% of Total
+         .          .     50:}
+         .          .     51:
+         .          .     52:func counter() {
+         .          .     53:	slice := make([]int, 0)
+         .          .     54:	var c int
+      10ms       10ms     55:	for i := 0; i < 100000; i++ {
+         .          .     56:		c = i + 1 + 2 + 3 + 4 + 5
+         .       60ms     57:		slice = append(slice, c)
+         .          .     58:	}
+         .          .     59:	_ = slice
+         .          .     60:}
+         .          .     61:
+         .          .     62:func workOnce(wg *sync.WaitGroup) {
+(pprof) 
+```
 
-flat/flat%：分别表示在当前层级cpu的占用时间和百分比。例如runtime.memmove在当前层级占用cpu时间380ms，占比本次采集时间的55.07%。
+可见，程序的 55 行和 57 行分别占用 10ms 和 60ms，这就是优化的主要方向。通过分析程序发现，由于切片的初始容量为 0，导致循环 `append` 时触发多次扩容。切片的扩容方式是：申请 2 倍或者 1.25 倍的原来长度的新切片，再将原来的切片数据拷贝进去。
 
-cum/cum%：分别表示截止到当前层级累积的cpu时间和占比。例如main.counter累积占用时间510ms，占本次采集时间的73.91%。
+仔细一看还会发现：`runtime.usleep` 占用 CPU 时间将近 20%，但是程序明明没有任何 sleep 相关的代码，却为什么会出现，并且还占用这么高呢？大家可以先思考一下，后文将揭晓。
 
-sum%：所有层级的cpu时间累积占用，从小到大一直累积到100%，即690ms。
+当然，也可以使用 `web` 命令获得更加直观的信息。macOS 通过如下命令安装渲染工具 graphviz。
 
-从上图中的cum数据可以看到，counter函数的cpu占用时间最多，那就利用list命令查看占用的主要因素。
-
-
-从上图中看到，程序的16行和14行分别占用490ms和20ms，这就是我们优化的主要方向。通过分析程序发现，由于slice的初始容量为0，导致在循环中append时将发生多次扩容。slice的扩容方式是：申请2倍或者1.25倍的原来长度的新slice，再将原来的slice拷贝进去。
-
-相信大家也注意到runtime.usleep了，占用CPU时间将近20%，但是程序中明明没有任何sleep相关的代码，那为什么会出现，并且还占用这么高呢？大家可以先思考一下，后文将揭晓。
-
-当然，也可以使用web指令获得更加直观的信息，MacOS下通过如下命令安装渲染工具。
-
+```bash
 brew install graphviz
-安装完成后在pprof的命令行中输入web即可生成一个svg格式的文件，将其用浏览器打开即可得到如下所示：
+```
 
+安装完成后，在 pprof 的命令行输入 `web` 即可生成一个 svg 格式的文件，将其用浏览器打开即可看到如下界面：
 
-由于文件过大，我们只截取部分重要内容如下图所示。可以看出其基本信息和命令行下的信息相同，但是可以明显看出runtime.memmove耗时380ms，由图逆向推断main.counter是主要的优化方向。图中各个方块的大小也代表cpu占用的情况，方块越大说明占用cpu时间越长。
+TODO
 
+由于文件过大，此处只截取部分重要内容如下。
 
+可以看出其基本信息和命令行下的信息相同，但是可以明显看出 `runtime.memmove` 耗时 380ms。由图逆向推断 `main.counter` 是主要的优化方向。图中各个方块的大小也代表 CPU 占用的情况，方块越大说明占用 CPU 时间越长。
 
+同理可以分析 mem.pprof 文件，从而得出内存消耗的主要原因进一步进行改进。
 
-同理，我们可以分析mem.pprof文件，从而得出内存消耗的主要原因进一步进行改进。
+上述 `main.counter` 占用 CPU 时间过多的问题，实际上是 `append` 函数重新分配内存造成的。那简单的做法就是事先申请一个大的内存，避免频繁的进行内存分配。所以将 `counter` 函数进行改造：
 
-上述main.counter占用cpu时间过多的问题，实际上是append函数中内存的重新分配造成的，那简单的做法就是事先申请一个大的内存，避免频繁的进行内存分配。所以将counter函数进行改造：
+```
+TODO
+```
 
-func counter() {
-    slice := [100000]int{0}
-    c := 1
-    for i := 0; i < 100000; i++ {
-        c = i + 1 + 2 + 3 + 4 + 5
-        slice[i] = c    
-    }
-}
-通过编译、运行、采集pprof信息后如下图所示，发现已经采集不到占用cpu比较多的函数，即已经完成优化。同学们可以试试如果在counter中添加一个fmt.Println函数后，对cpu占用会有什么影响呢？
+通过编译、运行、采集 pprof 信息后如下图所示。
 
+可见，已经采集不到占用 CPU 比较多的函数，即已经完成优化。同学们可以试试如果往 `counter` 添加一个 `fmt.Println` 函数后，对 CPU 占用会有什么影响呢？
 
 ## net/http/pprof
 
-针对后台服务型应用，服务一般不能停止，我们需要使用net/http/pprof包。类似上述代码，我们编写如下代码：
+针对后台服务型应用，服务一般不能停止，这时需要使用 net/http/pprof 包。类似上述代码，编写如下代码：
 
-package main
+```
+TODO
+```
 
-import (
-    "time"
-    "net/http"
-    _ "net/http/pprof"
-)
+首先导入 net/http/pprof 包。注意该包利用下划线 `_` 导入，意味着只需要该包运行其 `init()` 函数即可。这样之后，该包将自动完成信息采集并保存到内存。所以服务上线时需要将 net/http/pprof 包移除，避免其影响服务的性能，更重要的是防止其造成内存的不断上涨。
 
-func counter() {
-    slice := make([]int, 0)
-    c := 1
-    for i := 0; i < 100000; i++ {
-        c = i + 1 + 2 + 3 + 4 + 5
-        slice = append(slice, c)
-    }
-}
+编译并运行依赖，便可以访问：http://localhost:8000/debug/pprof/ 查看服务的运行情况。本文实验得出如下示例，大家可以自行探究查看。不断刷新网页可以发现采样结果也在不断更新中。
 
-func workForever() {
-    for {
-        go counter()
-        time.Sleep(1 * time.Second)
-    }
-}
+TODO
 
-func httpGet(w http.ResponseWriter, r *http.Request) {
-    counter()
-}
+当然也可以网页形式查看。现在以查看内存为例，在服务程序运行时，执行下列命令采集内存信息。
 
-func main() {
-    go workForever()
-    http.HandleFunc("/get", httpGet)
-    http.ListenAndServe("localhost:8000", nil)
-}
-首先导入net/http/pprof包，注意该包利用下划线"_"导入，意味着我们只需要该包运行其init()函数即可，如此该包将自动完成信息采集并保存在内存中。所以在服务上线时需要将net/http/pprof包移除，其不仅影响服务的性能，更重要的是会造成内存的不断上涨。
-
-通过编译、运行，我们便可以访问：http://localhost:8000/debug/pprof/查看服务的运行情况，本文给出如下示例，大家可以自行探究查看，同时不断刷新网页可以发现采样结果也在不断更新中。
-
-
-当然我们也可以利用web形式查看，现在以查看memory为例，在服务程序运行时，执行下列命令采集内存信息。
-
+```bash
 go tool pprof main http://localhost:8000/debug/pprof/heap
-采集完成后利用web指令得到svg文件
+```
 
+采集完成后调用 web 命令得到如下 svg 文件
 
-通过浏览器查看svg文件，如下图所示。该图表明所有的heap空间均由counter产生；同时我们可以生成cpu的svg文件同步进行分析优化方向。
+TODO
 
+该图表明所有的堆空间均由 `counter` 产生，同理可以生成 CPU 的 svg 文件用于同步进行分析优化方向。
 
-上述方法在工具型应用中可以使用，然而在服务型应用时，仅仅只是采样了部分代码段；而只有当有大量请求时才能看到应用服务的主要优化信息，同时Uber开源的火焰图工具go-torch能够辅助我们直观的完成测评。要想实现火焰图的效果，需要安装如下3个工具：
+上述方法在工具型应用可以使用，然而在服务型应用时，仅仅只是采样了部分代码段；而只有当有大量请求时才能看到应用服务的主要优化信息。
+
+另外，Uber 开源的火焰图工具 go-torch 能够辅助我们直观地完成测评。要想实现火焰图的效果，需要安装如下 3 个工具：
 
 go get -v github.com/uber/go-torch
 git clone https://github.com/brendangregg/FlameGraph.git
